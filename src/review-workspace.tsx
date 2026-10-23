@@ -447,7 +447,9 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
       if (Date.now() < scrollLock.current) return;
       const first = entries.filter((item) => item.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
       const id = (first?.target as HTMLElement | undefined)?.dataset.questionId;
-      if (id) { setActiveQuestionId(id); setActiveReferenceId(""); updateAddress(examId, paperId, id, true); }
+      // Passive scroll tracking must not replace a reference the reader chose.
+      // Explicit question navigation and opening a paper clear it separately.
+      if (id) { setActiveQuestionId(id); updateAddress(examId, paperId, id, true); }
     }, { root: readingRef.current, rootMargin: "0px 0px -65% 0px", threshold: 0 });
     readingRef.current.querySelectorAll(".br-question-section").forEach((element) => observer.observe(element));
     return () => observer.disconnect();
@@ -490,6 +492,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
     });
   };
   const selectReference = (id: string, questionId?: string) => {
+    scrollLock.current = Date.now() + 900;
     if (questionId) setActiveQuestionId(questionId);
     if (!refMap.has(id)) { setNotice("이 근거의 본문을 찾을 수 없습니다."); return; }
     setActiveReferenceId(id); setRightTab("reference"); setMobileTab("reference"); setSelection(null);
