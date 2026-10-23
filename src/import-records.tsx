@@ -27,7 +27,7 @@ export function ImportRecordsButton({ userId, onImported, serverNotes, serverRev
     const originalUser = userId;
     setBusy(true); setMessage(""); setFailed(false);
     try {
-      if (!userId || userId === "guest") throw Error("로그인한 뒤 기록을 가져와 주세요.");
+      if (!userId || userId === "guest") throw Error("검토실 연결이 준비되면 기록을 가져와 주세요.");
       if (!resolveTarget || !serverNotes || !serverReviews) throw Error("저장된 기록과 문제 목록을 불러온 뒤 다시 가져와 주세요.");
       if (!file.name.toLowerCase().endsWith(".json")) throw Error("‘전체 기록 내보내기’로 받은 JSON 파일을 선택해 주세요.");
       if (file.size > MAX_IMPORT_BYTES) throw Error("기록 파일이 20MB를 초과합니다.");

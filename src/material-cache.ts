@@ -24,7 +24,7 @@ export class MaterialUrlCache {
   }
   async get(path: string): Promise<string> {
     const key = materialKey(path);
-    if (!this.owner) throw Error("자료에 접근하려면 로그인해 주세요.");
+    if (!this.owner) throw Error("자료 연결을 확인하고 있습니다. 잠시 후 다시 시도해 주세요.");
     const owner = this.owner, generation = this.generation;
     const cached = this.values.get(key);
     if (cached && cached.expires > this.now()) return cached.url;

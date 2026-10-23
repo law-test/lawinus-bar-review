@@ -6,7 +6,7 @@ export const supabase=createClient('https://cefaekvclooytgjkcqum.supabase.co','s
 const bucket='bar-review-materials';
 const urls=new MaterialUrlCache(async key=>{
   const {data,error}=await supabase.storage.from(bucket).createSignedUrl(key,3600);
-  if(error||!data)throw Error('자료에 접근할 수 없습니다. 로그인 상태를 확인해 주세요.');
+  if(error||!data)throw Error('자료에 접근할 수 없습니다. 연결 상태를 확인해 주세요.');
   return data.signedUrl;
 });
 export function clearMaterialUrls(){urls.clear();}
