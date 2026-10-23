@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import type {
   AnchorMeta, ExamIndex, NoteEditor, PaperIndex, PersonalNote, PersonalReview,
-  ReviewCatalog, ReviewDraft, ReviewPaper, ReviewQuestion, ReviewReference,
+  ReviewAtom, ReviewCatalog, ReviewDraft, ReviewPaper, ReviewQuestion, ReviewReference,
   ReviewUser, SelectionAnchor,
 } from "./review-types";
 import "./review.css";
@@ -612,10 +612,15 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const locateNote = useCallback((note: PersonalNote) => {
     const question = paper?.questions.find((q) => q.id === note.questionId);
     const article = document.getElementById(qElementId(note.questionId)); if (!article || !question) return false;
+    const atomElement = note.atomId ? Array.from(article.querySelectorAll<HTMLElement>("[data-atom-id]")).find((element) => element.dataset.atomId === note.atomId) : undefined;
+    if (atomElement) {
+      const previous = atomElement.closest<HTMLDetailsElement>("details[data-retired-atoms]");
+      if (previous) previous.open = true;
+    }
     setActiveQuestionId(note.questionId); setMobileTab("reading"); scrollLock.current = Date.now() + 900;
     article.scrollIntoView({ block: "start" });
     if (!note.anchorText) {
-      if (note.atomId) Array.from(article.querySelectorAll<HTMLElement>("[data-atom-id]")).find((element) => element.dataset.atomId === note.atomId)?.scrollIntoView({ block: "center" });
+      atomElement?.scrollIntoView({ block: "center" });
       return true;
     }
     let regions = Array.from(article.querySelectorAll<HTMLElement>("[data-anchor-region]"));
@@ -822,8 +827,19 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
         </div></details>;
   };
 
+  const renderAtom = (question: ReviewQuestion, atom: ReviewAtom, atomIndex: number) => <article className="br-atom" key={atom.id} data-atom-id={atom.id}>
+    <span className="br-atom-number">{String(atomIndex + 1).padStart(2, "0")}</span><div className="br-atom-main">
+      <div className="br-atom-heading"><span>{atom.label}</span><span className="br-atom-tools">{atom.answer && <b className={`br-answer br-answer-${atom.answer.toLowerCase()}`}>{atom.answer}</b>}<button className="br-icon-button" aria-label={`${atom.label}에 메모 붙이기`} onClick={() => startNote(question, atom.id)}><Plus size={15} /></button></span></div>
+      <p className="br-atom-statement" data-anchor-region="atom-statement">{atom.statement}</p>
+      {atom.explanationHtml && <div className="br-prose br-atom-explanation" data-anchor-region="atom-explanation" dangerouslySetInnerHTML={{ __html: atom.explanationHtml }} />}
+      {refsFor(atom.referenceIds ?? [], question.id)}
+      {renderPersonalReview(question, atom.id, atom.label)}
+    </div></article>;
+
   const renderQuestion = (question: ReviewQuestion, index: number) => {
     const noteCount = combinedNotes.filter((note) => note.paperId === paperId && note.questionId === question.id).length;
+    const currentAtoms = question.atoms.filter((atom) => !atom.retired).sort((a, b) => COLLATOR.compare(a.label, b.label));
+    const previousAtoms = question.atoms.filter((atom) => atom.retired).sort((a, b) => COLLATOR.compare(a.label, b.label));
     return <section className="br-question-section" id={qElementId(question.id)} data-question-id={question.id} key={question.id} aria-labelledby={`heading-${question.id}`}>
       <div className="br-question-kicker"><span>{paper?.subject} · {paper?.kind}</span><span>{String(index + 1).padStart(2, "0")} / {paper?.questions.length}</span></div>
       <div className="br-question-heading"><h2 id={`heading-${question.id}`}>{question.label}</h2><button className="br-icon-button" title="이 문항에 메모" aria-label={`${question.label}에 메모 붙이기`} onClick={() => startNote(question)}><StickyNote size={18} /></button></div>
@@ -834,15 +850,11 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
       {question.explanationHtml && <div className="br-explanation"><div className="br-section-label"><span className="br-small-rule" />해설</div>
         <div className="br-prose br-explanation-text" data-anchor-region="explanation" dangerouslySetInnerHTML={{ __html: question.explanationHtml }} />
         {refsFor(question.referenceIds ?? [], question.id)}</div>}
-      {question.atoms.length > 0 && <div className="br-atoms"><div className="br-section-label"><span className="br-small-rule" />풀이 atom <span className="br-count">{question.atoms.length}</span></div>
-        {[...question.atoms].sort((a, b) => COLLATOR.compare(a.label, b.label)).map((atom, atomIndex) => <article className="br-atom" key={atom.id} data-atom-id={atom.id}>
-          <span className="br-atom-number">{String(atomIndex + 1).padStart(2, "0")}</span><div className="br-atom-main">
-            <div className="br-atom-heading"><span>{atom.label}</span><span className="br-atom-tools">{atom.answer && <b className={`br-answer br-answer-${atom.answer.toLowerCase()}`}>{atom.answer}</b>}<button className="br-icon-button" aria-label={`${atom.label}에 메모 붙이기`} onClick={() => startNote(question, atom.id)}><Plus size={15} /></button></span></div>
-            <p className="br-atom-statement" data-anchor-region="atom-statement">{atom.statement}</p>
-            {atom.explanationHtml && <div className="br-prose br-atom-explanation" data-anchor-region="atom-explanation" dangerouslySetInnerHTML={{ __html: atom.explanationHtml }} />}
-            {refsFor(atom.referenceIds ?? [], question.id)}
-            {renderPersonalReview(question, atom.id, atom.label)}
-          </div></article>)}
+      {question.atoms.length > 0 && <div className="br-atoms"><div className="br-section-label"><span className="br-small-rule" />풀이 atom <span className="br-count">{currentAtoms.length}</span></div>
+        <div className="br-current-atoms">{currentAtoms.map((atom, atomIndex) => renderAtom(question, atom, atomIndex))}</div>
+        {previousAtoms.length > 0 && <details className="br-retired-atoms" data-retired-atoms><summary>이전 문장과 기록 <span className="br-count">{previousAtoms.length}</span></summary>
+          {previousAtoms.map((atom, atomIndex) => renderAtom(question, atom, atomIndex))}
+        </details>}
       </div>}
       {renderPersonalReview(question)}
       <button className="br-question-note-link" onClick={() => { setActiveQuestionId(question.id); setRightTab("notes"); setMobileTab("reference"); }}><MessageSquareText size={14} />이 문항의 메모 <b>{noteCount}</b><ArrowRight size={13} /></button>

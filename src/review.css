@@ -329,3 +329,6 @@
   .br-center:before { display:none; }
   .br-question-text { font-size:12pt; }
 }
+.br-retired-atoms { margin-top:24px; padding:14px 16px; border:1px solid #e0cfed; border-radius:10px; background:#faf7ff; }
+.br-retired-atoms>summary { cursor:pointer; color:#745b85; font-size:13px; line-height:1.8; }
+.br-retired-atoms>summary .br-count { margin-left:6px; }

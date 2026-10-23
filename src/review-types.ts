@@ -36,6 +36,9 @@ export type ReviewAtom = {
   explanationHtml?: string;
   referenceIds: string[];
   status?: string;
+  retired?: boolean;
+  splitChildIds?: string[];
+  parentId?: string;
 };
 export type ReviewQuestion = {
   id: string;
