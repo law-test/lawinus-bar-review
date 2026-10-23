@@ -5,7 +5,7 @@ export type ImportTarget = { paperId: string; questionId: string; atomIds: strin
 export type TargetRequest = { paperId: string; questionId: string; atomId?: string };
 export type TargetResolver = (target: TargetRequest) => Promise<ImportTarget | undefined>;
 export type ImportSummary = { notesAdded: number; reviewsAdded: number; duplicatesSkipped: number; copiesPreserved: number; changedQuestions: number };
-export type RecordExport = { personalNotes: PersonalNote[]; personalReviews: PersonalReview[]; unsavedReviewDrafts: ReviewDraft[] };
+export type RecordExport = { personalNotes: PersonalNote[]; unsavedNoteDrafts: PersonalNote[]; personalReviews: PersonalReview[]; unsavedReviewDrafts: ReviewDraft[] };
 export const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
 const MAX_RECORDS = 20_000;
 const noteColors = new Set(["yellow", "green", "pink", "blue"]);
@@ -87,14 +87,15 @@ function list(value: unknown, label: string): unknown[] {
 }
 export function parseRecordExport(value: unknown): RecordExport {
   const row = object(value, "기록 파일");
-  if (!["personalNotes", "personalReviews", "unsavedReviewDrafts"].some(key => Object.hasOwn(row, key))) {
+  if (!["personalNotes", "unsavedNoteDrafts", "personalReviews", "unsavedReviewDrafts"].some(key => Object.hasOwn(row, key))) {
     throw Error("‘전체 기록 내보내기’로 받은 JSON 파일을 선택해 주세요.");
   }
   const personalNotes = list(row.personalNotes ?? [], "메모").map(parseNote);
+  const unsavedNoteDrafts = list(row.unsavedNoteDrafts ?? [], "메모 초안").map(value => ({ ...parseNote(value), localOnly: true }));
   const personalReviews = list(row.personalReviews ?? [], "검토 기록").map(parseReview);
   const unsavedReviewDrafts = list(row.unsavedReviewDrafts ?? [], "검토 초안").map(parseReviewDraft);
-  if (personalNotes.length + personalReviews.length + unsavedReviewDrafts.length > MAX_RECORDS) throw Error("한 번에 가져올 수 있는 기록은 20,000개입니다.");
-  return { personalNotes, personalReviews, unsavedReviewDrafts };
+  if (personalNotes.length + unsavedNoteDrafts.length + personalReviews.length + unsavedReviewDrafts.length > MAX_RECORDS) throw Error("한 번에 가져올 수 있는 기록은 20,000개입니다.");
+  return { personalNotes, unsavedNoteDrafts, personalReviews, unsavedReviewDrafts };
 }
 export function parseLocalDrafts(raw: string | null): DraftState {
   if (raw == null) return { notes: [], reviews: {} };
@@ -131,7 +132,7 @@ export async function mergeImportedRecords(input: RecordExport, current: DraftSt
   const serverReviewMap = new Map(serverReviews.map(row => [reviewKey(row), row]));
   const verified = new Map<string, ImportTarget>();
   const changed = new Set<string>();
-  for (const row of [...input.personalNotes, ...input.personalReviews, ...input.unsavedReviewDrafts]) {
+  for (const row of [...input.personalNotes, ...input.unsavedNoteDrafts, ...input.personalReviews, ...input.unsavedReviewDrafts]) {
     const key = `${row.paperId}::${row.questionId}`;
     let resolved = verified.get(key);
     if (!resolved) {
@@ -146,10 +147,15 @@ export async function mergeImportedRecords(input: RecordExport, current: DraftSt
   }
   summary.changedQuestions = changed.size;
   const seenNotes = new Map<string, PersonalNote>();
-  for (const original of input.personalNotes) {
-    const repeated = seenNotes.get(original.id);
+  const savedInBackup = new Map(input.personalNotes.map(row => [row.id, row]));
+  for (const {original, draft} of [...input.personalNotes.map(original => ({original,draft:false})),
+    ...input.unsavedNoteDrafts.map(row => ({original:{...row,localOnly:true},draft:true}))]) {
+    const seenKey = `${draft ? "draft" : "saved"}:${original.id}`;
+    const backedUp = savedInBackup.get(original.id);
+    if (draft && backedUp && !sameTarget(backedUp, original)) throw Error("백업의 메모와 수정 초안이 다른 문항에 연결되어 있습니다. 가져오기를 중단했습니다.");
+    const repeated = seenNotes.get(seenKey);
     if (repeated && noteContent(repeated) !== noteContent(original)) throw Error("같은 메모 번호에 서로 다른 내용이 들어 있습니다. 파일을 확인해 주세요.");
-    seenNotes.set(original.id, original);
+    seenNotes.set(seenKey, original);
     const saved = serverNoteMap.get(original.id);
     if (saved && !sameTarget(saved, original)) throw Error("같은 메모 번호가 다른 문항에 연결되어 있습니다. 가져오기를 중단했습니다.");
     if (saved && (!original.localOnly || noteContent(saved) === noteContent(original))) { summary.duplicatesSkipped++; continue; }

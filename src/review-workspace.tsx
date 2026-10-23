@@ -14,7 +14,9 @@ import type {
   ReviewUser, SelectionAnchor,
 } from "./review-types";
 import "./review.css";
-import {appFetch as fetch, hydrateMaterialLinks} from "./backend";
+import {appFetch as fetch, hydrateMaterialLinks, supabase} from "./backend";
+import {collectRecordBackup, reconnectNote} from "./record-backup";
+import type {SavedRecords, HistoryPage} from "./record-backup";
 import { ImportRecordsButton } from "./import-records";
 import RecordHistory from "./record-history";
 import type { TargetRequest } from "./import-records-core";
@@ -79,6 +81,21 @@ async function recordRequest<T>(url: string, method: string, data?: unknown): Pr
   try { result = await response.json(); } catch { /* The status below also covers non-JSON errors. */ }
   if (!response.ok) throw new RecordError(response.status, result.current as PersonalNote | PersonalReview | undefined, result.error as string | undefined);
   return (result.note ?? result.review ?? result.record ?? result) as T;
+}
+
+async function readSavedRecords(): Promise<SavedRecords> {
+  const response = await fetch("/api/records", { credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) throw Error("저장된 기록을 확인하지 못했습니다.");
+  const data = await response.json() as SavedRecords;
+  if (!Array.isArray(data.notes) || !Array.isArray(data.reviews)) throw Error("저장된 기록을 확인하지 못했습니다.");
+  return data;
+}
+async function readHistoryPage(offset: number): Promise<HistoryPage> {
+  const {data,error} = await supabase.rpc("bar_review_record_history", {page_offset: offset});
+  if (error || data?.status !== 200 || !Array.isArray(data.data?.history) || typeof data.data.hasMore !== "boolean") {
+    throw Error("변경 이력 전체를 확인하지 못했습니다.");
+  }
+  return data.data as HistoryPage;
 }
 
 function StatusBadge({ review, hash }: { review?: PersonalReview; hash?: string }) {
@@ -150,6 +167,8 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const [recordsError, setRecordsError] = useState("");
   const [recordsReady, setRecordsReady] = useState(false);
   const [editor, setEditor] = useState<NoteEditor | null>(null);
+  const [noteSourceChecking, setNoteSourceChecking] = useState(false);
+  const [noteReconnect, setNoteReconnect] = useState<{id: string; contentHash: string} | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [reviewSaving, setReviewSaving] = useState<Record<string, boolean>>({});
   const [reviewErrors, setReviewErrors] = useState<Record<string, { message: string; current?: PersonalReview }>>({});
@@ -166,6 +185,8 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const [recordTab, setRecordTab] = useState<"notes" | "reviews">("notes");
   const [markdownPreview, setMarkdownPreview] = useState<string | null>(null);
   const [markdownBusy, setMarkdownBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
   const [, refreshRecordMetadata] = useState(0);
   const [unresolvedOnly, setUnresolvedOnly] = useState(false);
   const [notice, setNotice] = useState("");
@@ -178,7 +199,18 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const dialogRef = useRef<HTMLDialogElement>(null);
   const lastRecordTrigger = useRef<HTMLElement | null>(null);
   const scrollLock = useRef(0);
+  const workspaceAlive = useRef(true);
+  const recordsGeneration = useRef(0);
+  const recordWrites = useRef(0);
+  const latestEditor = useRef(editor);
+  const sourceCheckGeneration = useRef(0);
+  latestEditor.current = editor;
   const storageKey = `law-review:drafts:v1:${initialUser?.id ?? "guest"}`;
+  useEffect(() => {
+    workspaceAlive.current = true;
+    return () => { workspaceAlive.current = false; recordsGeneration.current++; sourceCheckGeneration.current++; };
+  }, []);
+  useEffect(() => { sourceCheckGeneration.current++; setNoteReconnect(null); setNoteSourceChecking(false); }, [editor?.id]);
 
   const exam = catalog?.exams.find((item) => item.id === examId);
   const paperIndex = catalog?.exams.flatMap((item) => item.papers).find((item) => item.id === paperId);
@@ -207,18 +239,23 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const activeReference = refMap.get(activeReferenceId) ?? relevantReferences[0];
 
   const loadRecords = useCallback(async () => {
-    if (!initialUser) return;
+    if (!initialUser || recordWrites.current > 0 || !workspaceAlive.current) return;
+    const request = ++recordsGeneration.current;
+    const current = () => workspaceAlive.current && request === recordsGeneration.current && recordWrites.current === 0;
     setRecordsReady(false);
     try {
-      const response = await fetch("/api/records", { credentials: "same-origin", cache: "no-store" });
-      if (!response.ok) throw new Error();
-      const data = await response.json() as { notes?: PersonalNote[]; reviews?: PersonalReview[] };
-      if (!Array.isArray(data.notes) || !Array.isArray(data.reviews)) throw new Error();
+      const data = await readSavedRecords();
+      if (!current()) return;
       setNotes(data.notes); setReviews(data.reviews);
       setRecordsError(""); setRecordsReady(true);
       return { notes: data.notes, reviews: data.reviews };
-    } catch { setRecordsError("저장된 기록을 불러오지 못했습니다. 초안은 유지됩니다."); }
+    } catch { if (current()) setRecordsError("저장된 기록을 불러오지 못했습니다. 초안은 유지됩니다."); }
   }, [initialUser?.id]);
+  const beginRecordWrite = () => { recordsGeneration.current++; recordWrites.current++; };
+  const endRecordWrite = () => {
+    recordsGeneration.current++; recordWrites.current--;
+    if (workspaceAlive.current && recordWrites.current === 0) void loadRecords();
+  };
 
   const loadRawPaper = useCallback(async (index: PaperIndex, signal?: AbortSignal) => {
     return paperCache.current.raw(index.id, async () => {
@@ -514,28 +551,33 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   };
   const saveNote = async (note = editor) => {
     if (!note || !note.body.trim()) { if (editor) setEditor({ ...editor, error: "메모 내용을 적어 주세요." }); return; }
-    setNoteSaving(true); upsertDraft(note);
+    setNoteSaving(true); upsertDraft(note); beginRecordWrite();
     try {
       const saved = await recordRequest<PersonalNote>("/api/notes", "PUT", {
         ...(note.id.startsWith("draft-") ? { clientId: note.id } : { id: note.id }), paperId: note.paperId, questionId: note.questionId,
         atomId: note.atomId, anchorText: note.anchorText, anchorMeta: note.anchorMeta, body: note.body,
         color: note.color, resolved: note.resolved, contentHash: note.contentHash, expectedRevision: note.revision,
       });
+      if (!workspaceAlive.current) return;
       setNotes((previous) => [...previous.filter((item) => item.id !== saved.id), saved]);
       setNoteDrafts((previous) => previous.filter((item) => item.id !== note.id)); setEditor(null); setNotice("부전지를 저장했습니다.");
     } catch (error) {
+      if (!workspaceAlive.current) return;
       const message = error instanceof RecordError ? error.message : friendlyError(0);
       setEditor({ ...note, error: message, conflict: error instanceof RecordError ? error.current as PersonalNote : undefined });
-    } finally { setNoteSaving(false); }
+    } finally { endRecordWrite(); if (workspaceAlive.current) setNoteSaving(false); }
   };
   const removeNote = async (note: PersonalNote) => {
     if (!window.confirm("이 메모를 삭제할까요?")) return;
     if (note.id.startsWith("draft-")) { setNoteDrafts((previous) => previous.filter((item) => item.id !== note.id)); if (editor?.id === note.id) setEditor(null); return; }
+    beginRecordWrite();
     try {
       await recordRequest(`/api/notes?id=${encodeURIComponent(note.id)}${note.revision === undefined ? "" : `&expectedRevision=${encodeURIComponent(note.revision)}`}`, "DELETE");
+      if (!workspaceAlive.current) return;
       setNotes((previous) => previous.filter((item) => item.id !== note.id)); setNoteDrafts((previous) => previous.filter((item) => item.id !== note.id));
       if (editor?.id === note.id) setEditor(null); setNotice("메모를 삭제했습니다.");
-    } catch { setNotice("메모를 삭제하지 못했습니다. 다시 시도해 주세요."); }
+    } catch { if (workspaceAlive.current) setNotice("메모를 삭제하지 못했습니다. 다시 시도해 주세요."); }
+    finally { endRecordWrite(); }
   };
 
   const setReviewDraft = (question: ReviewQuestion, patch: Partial<ReviewDraft>, atomId?: string) => {
@@ -554,15 +596,17 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
       setReviewErrors((all) => ({ ...all, [key]: { message: "발견한 오류를 적어 주세요." } }));
       return;
     }
-    setReviewDrafts((all) => ({ ...all, [key]: draft })); setReviewSaving((all) => ({ ...all, [key]: true }));
+    setReviewDrafts((all) => ({ ...all, [key]: draft })); setReviewSaving((all) => ({ ...all, [key]: true })); beginRecordWrite();
     try {
       const saved = await recordRequest<PersonalReview>("/api/reviews", "PUT", { ...draft, atomId, contentHash: question.contentHash });
+      if (!workspaceAlive.current) return;
       setReviews((all) => [...all.filter((item) => keyFor(item.paperId, item.questionId, item.atomId) !== key), saved]);
       setReviewDrafts((all) => { const next = { ...all }; delete next[key]; return next; });
       setReviewErrors((all) => { const next = { ...all }; delete next[key]; return next; }); setNotice("개인 검증 기록을 저장했습니다.");
     } catch (error) {
+      if (!workspaceAlive.current) return;
       setReviewErrors((all) => ({ ...all, [key]: { message: error instanceof RecordError ? error.message : friendlyError(0), current: error instanceof RecordError ? error.current as PersonalReview : undefined } }));
-    } finally { setReviewSaving((all) => { const next = { ...all }; delete next[key]; return next; }); }
+    } finally { endRecordWrite(); if (workspaceAlive.current) setReviewSaving((all) => { const next = { ...all }; delete next[key]; return next; }); }
   };
 
   const locateNote = useCallback((note: PersonalNote) => {
@@ -615,11 +659,24 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
     const id = window.setTimeout(() => { locateNote(pendingNoteJump); setPendingNoteJump(null); }, 100); return () => window.clearTimeout(id);
   }, [paper, paperId, pendingNoteJump, locateNote]);
 
-  const exportRecords = () => {
-    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), catalogVersion: catalog?.version,
-      personalNotes: combinedNotes, personalReviews: reviews, unsavedReviewDrafts: Object.values(reviewDrafts) }, null, 2)], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url;
-    a.download = `민법위키_전체기록_${new Date().toISOString().slice(0, 10)}.json`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const exportRecords = async () => {
+    if (exportBusy) return;
+    setExportError("");
+    if (recordWrites.current > 0) { setExportError("기록 저장이 끝난 뒤 내보내 주세요."); return; }
+    const generation = recordsGeneration.current;
+    const current = () => workspaceAlive.current && recordsGeneration.current === generation && recordWrites.current === 0;
+    setExportBusy(true);
+    try {
+      const backup = await collectRecordBackup({ readRecords: readSavedRecords, readHistory: readHistoryPage,
+        isCurrent: current, noteDrafts, reviewDrafts: Object.values(reviewDrafts), catalogVersion: catalog?.version });
+      if (!current()) throw Error("기록이 변경되었습니다. 다시 내보내 주세요.");
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url;
+      a.download = `민법위키_전체기록_${new Date().toISOString().slice(0, 10)}.json`; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice("메모·초안·개인 검증·변경 이력을 모두 내보냈습니다.");
+    } catch (error) {
+      if (workspaceAlive.current) setExportError(`${error instanceof Error ? error.message : "전체 기록을 확인하지 못했습니다."} 백업 파일을 만들지 않았습니다. 초안은 유지됩니다.`);
+    } finally { if (workspaceAlive.current) setExportBusy(false); }
   };
 
   const notesMarkdown = async () => {
@@ -685,6 +742,39 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
 
   const reloadCurrentPaper = () => {
     paperCache.current.delete(paperId); setPaperAttempt((value) => value + 1); setCatalogAttempt((value) => value + 1); setNotice("최신 문제를 다시 불러옵니다. 초안은 유지됩니다.");
+  };
+  const prepareNoteReconnect = async () => {
+    const note = latestEditor.current;
+    if (!note || noteSaving || noteSourceChecking) return;
+    const request = ++sourceCheckGeneration.current;
+    const current = () => workspaceAlive.current && request === sourceCheckGeneration.current && latestEditor.current?.id === note.id;
+    setNoteSourceChecking(true); setNoteReconnect(null);
+    try {
+      const parent = catalog?.exams.find(item => item.papers.some(candidate => candidate.id === note.paperId));
+      const index = parent?.papers.find(item => item.id === note.paperId);
+      if (!parent || !index) throw Error("메모가 연결된 시험지를 찾을 수 없습니다. 기존 메모는 유지됩니다.");
+      paperCache.current.delete(note.paperId);
+      const latest = await loadRawPaper(index);
+      if (!current()) return;
+      const candidate = reconnectNote(note, latest);
+      setNoteReconnect({id: note.id, contentHash: candidate.contentHash});
+      setEditor(value => value?.id === note.id && value.error?.includes("본문이 변경") ? {...value, error: undefined} : value);
+      setFamily(parent.family); setExamId(parent.id); setPaperId(note.paperId); setRequestedQuestion(note.questionId);
+      updateAddress(parent.id, note.paperId, note.questionId); setPaperAttempt(value => value + 1);
+      setMobileTab("reading");
+      setNotice("최신 본문과 원래 인용문을 확인한 뒤 메모를 다시 연결해 주세요.");
+    } catch (error) {
+      if (current()) setEditor(value => value?.id === note.id ? {...value, error: error instanceof Error ? error.message : "최신 본문을 확인하지 못했습니다. 메모는 유지됩니다."} : value);
+    } finally { if (current()) setNoteSourceChecking(false); }
+  };
+  const confirmNoteReconnect = () => {
+    if (!editor || !paper || noteSaving || !noteReconnect || noteReconnect.id !== editor.id) return;
+    try {
+      const next = reconnectNote(editor, paper);
+      if (next.contentHash !== noteReconnect.contentHash) throw Error("본문이 다시 변경되었습니다. 최신 본문을 한 번 더 확인해 주세요.");
+      const confirmed = {...next, error: undefined, conflict: undefined};
+      setEditor(confirmed); upsertDraft(confirmed); setNoteReconnect(null); void saveNote(confirmed);
+    } catch (error) { setEditor({...editor, error: error instanceof Error ? error.message : "본문 연결을 확인하지 못했습니다."}); }
   };
   const importGuestDrafts = () => {
     const guest = readLocal<{ notes: PersonalNote[]; reviews: Record<string, ReviewDraft> }>("law-review:drafts:v1:guest", { notes: [], reviews: {} });
@@ -807,10 +897,11 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
             {activeReference ? <section className="br-reference-detail" key={activeReference.id}><div className="br-reference-detail-kicker"><span className={`br-reference-kind br-reference-kind-${activeReference.kind}`}>{referenceNames[activeReference.kind]}</span>{activeReference.status && <span>{activeReference.status}</span>}</div><h2>{activeReference.title}</h2><div className="br-prose br-reference-prose" onClick={handleReferenceClick} dangerouslySetInnerHTML={{ __html: activeReference.html || "<p>본문을 확인할 자료가 없습니다.</p>" }} />{activeReference.url && <a className="br-official-link" href={activeReference.url} target="_blank" rel="noreferrer">공식 원문 보기<ArrowUpRight size={14} /></a>}</section>
               : <div className="br-reference-empty"><Scale size={32} strokeWidth={1} /><h2>판단의 근거를 곁에.</h2><p>본문의 조문이나 판례를 누르면<br />이곳에서 이어 읽을 수 있습니다.</p><span>조문 · 판례 · 공식 원문</span></div>}
           </div> : <div role="tabpanel" id="br-notes-content" aria-labelledby="br-notes-tab"><div className="br-right-context"><span>{editor ? "메모 작성" : currentQuestion?.label ?? "나의 메모"}</span><button className="br-text-button" disabled={!currentQuestion} onClick={() => currentQuestion && startNote(currentQuestion)}><Plus size={13} />새 메모</button></div>
-            {editor && <section className={`br-note-editor br-note-${editor.color ?? "yellow"}`}><div className="br-editor-heading"><span>{editor.anchorText ? "선택한 글에 부전지" : editor.atomId ? "atom 메모" : "문항 메모"}</span><button className="br-icon-button" aria-label="메모 작성 닫기. 초안은 보존됩니다." onClick={() => setEditor(null)}><X size={15} /></button></div><p className="br-editor-context">{questionName(editor)}</p>{editor.anchorText && <blockquote>{editor.anchorText}</blockquote>}{editor.paperId === paperId && paper?.questions.find((q) => q.id === editor.questionId)?.contentHash !== editor.contentHash && <div className="br-form-error"><p>이 메모를 작성한 뒤 본문이 변경되었습니다. 인용 위치와 내용을 다시 확인해 주세요.</p><button className="br-text-button" onClick={() => { const q = paper?.questions.find((item) => item.id === editor.questionId); if (q) updateEditor({ contentHash: q.contentHash }); }}>현재 본문을 확인했습니다. 메모 유지</button></div>}<label className="br-sr-only" htmlFor="br-note-body">메모 내용</label><textarea ref={editorRef} disabled={noteSaving} id="br-note-body" placeholder="떠오른 생각, 더 확인할 것을 적어 보세요." value={editor.body} rows={7} onChange={(event) => updateEditor({ body: event.target.value })} />
+            {editor && <section className={`br-note-editor br-note-${editor.color ?? "yellow"}`}><div className="br-editor-heading"><span>{editor.anchorText ? "선택한 글에 부전지" : editor.atomId ? "atom 메모" : "문항 메모"}</span><button className="br-icon-button" aria-label="메모 작성 닫기. 초안은 보존됩니다." onClick={() => setEditor(null)}><X size={15} /></button></div><p className="br-editor-context">{questionName(editor)}</p>{editor.anchorText && <blockquote>{editor.anchorText}</blockquote>}{editor.paperId === paperId && paper?.questions.find((q) => q.id === editor.questionId)?.contentHash !== editor.contentHash && <div className="br-form-error"><p>이 메모를 작성한 뒤 본문이 변경되었습니다. 인용 위치와 내용을 다시 확인해 주세요.</p><button className="br-text-button" disabled={noteSourceChecking || noteSaving} onClick={() => void prepareNoteReconnect()}>{noteSourceChecking ? "최신 본문 확인 중…" : "최신 본문 확인"}</button></div>}<label className="br-sr-only" htmlFor="br-note-body">메모 내용</label><textarea ref={editorRef} disabled={noteSaving} id="br-note-body" placeholder="떠오른 생각, 더 확인할 것을 적어 보세요." value={editor.body} rows={7} onChange={(event) => updateEditor({ body: event.target.value })} />
               <div className="br-editor-color-row"><div aria-label="부전지 색상" className="br-note-colors">{NOTE_COLORS.map((color, index) => <button disabled={noteSaving} aria-label={`${["노랑", "민트", "분홍", "파랑"][index]} 부전지`} aria-pressed={editor.color === color} className={`br-color-${color}`} key={color} onClick={() => updateEditor({ color })}>{editor.color === color && <Check size={12} />}</button>)}</div><span>초안 보관</span></div>
-              {editor.error && <div className="br-form-error" role="alert"><p>{editor.error}</p>{editor.error.includes("본문이 변경") && <button className="br-text-button" onClick={reloadCurrentPaper}>최신 문제 다시 불러오기</button>}{editor.conflict && <><p className="br-conflict-current">저장된 메모: {editor.conflict.body}</p><button className="br-text-button" onClick={() => updateEditor({ revision: editor.conflict!.revision, conflict: undefined })}>위 내용을 확인했습니다. 내 메모로 다시 저장</button></>}{!initialUser && <a href={RECONNECT} target="_top">다시 연결하기 <ArrowUpRight size={12} /></a>}</div>}
-              <button className="br-button br-button-primary br-full-width" onClick={() => void saveNote()} disabled={noteSaving}>{noteSaving ? <LoaderCircle size={14} className="br-spin" /> : <Check size={14} />}메모 저장</button></section>}
+              {editor.error && <div className="br-form-error" role="alert"><p>{editor.error}</p><button className="br-text-button" disabled={noteSourceChecking || noteSaving} onClick={() => void prepareNoteReconnect()}>{noteSourceChecking ? "최신 본문 확인 중…" : "최신 문제 다시 불러오기"}</button>{editor.conflict && <><p className="br-conflict-current">저장된 메모: {editor.conflict.body}</p><button className="br-text-button" onClick={() => updateEditor({ revision: editor.conflict!.revision, conflict: undefined })}>위 내용을 확인했습니다. 내 메모로 다시 저장</button></>}{!initialUser && <a href={RECONNECT} target="_top">다시 연결하기 <ArrowUpRight size={12} /></a>}</div>}
+              {noteReconnect?.id === editor.id && <div className="br-form-error" role="status"><p>최신 본문을 확인한 뒤 다시 연결해 주세요. 메모와 원래 인용문은 그대로 유지됩니다.</p><div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:12}}><button className="br-button br-button-primary" style={{minHeight:44}} disabled={noteSaving || paperLoading || paper?.id !== editor.paperId || paper.questions.find(item => item.id === editor.questionId)?.contentHash !== noteReconnect.contentHash} onClick={confirmNoteReconnect}>이 본문에 다시 연결하고 저장</button><button className="br-button" style={{minHeight:44}} onClick={() => setNoteReconnect(null)}>다시 연결 취소</button></div></div>}
+              <button className="br-button br-button-primary br-full-width" onClick={() => void saveNote()} disabled={noteSaving || noteSourceChecking || !!noteReconnect}>{noteSaving ? <LoaderCircle size={14} className="br-spin" /> : <Check size={14} />}메모 저장</button></section>}
             {currentNotes.filter((note) => note.id !== editor?.id).map((note) => renderNote(note))}
             {!currentNotes.length && !editor && <div className="br-reference-empty br-notes-empty"><PenLine size={30} strokeWidth={1} /><h2>생각을 남기는 자리.</h2><p>본문에서 글을 선택해 부전지를 붙이거나,<br />이 문항에 자유롭게 메모해 보세요.</p><button className="br-button" disabled={!currentQuestion} onClick={() => currentQuestion && startNote(currentQuestion)}><Plus size={14} />첫 메모 남기기</button></div>}
             <button className="br-all-notes-link" onClick={(event) => { lastRecordTrigger.current = event.currentTarget; setAllRecordsOpen(true); }}>전체 기록 모아보기<ArrowUpRight size={13} /></button>
@@ -825,7 +916,8 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
         serverNotes={recordsReady && !recordsError ? notes : undefined} serverReviews={recordsReady && !recordsError ? reviews : undefined}
         getServerRecords={loadRecords} resolveTarget={catalog ? resolveImportedTarget : undefined} onImported={(drafts) => {
           setNoteDrafts(drafts.notes); setReviewDrafts(drafts.reviews); setStorageError(false); setMarkdownPreview(null); refreshRecordMetadata(value => value + 1);
-        }} />}<RecordHistory /><button className="br-button" onClick={exportRecords}><ArrowDownToLine size={14} />전체 기록 내보내기</button><button className="br-icon-button" aria-label="기록 모아보기 닫기" onClick={() => setAllRecordsOpen(false)}><X size={20} /></button></div></div>
+        }} />}<RecordHistory /><button className="br-button" disabled={exportBusy} onClick={() => void exportRecords()}><ArrowDownToLine size={14} />{exportBusy ? "전체 기록 확인 중…" : "전체 기록 내보내기"}</button><button className="br-icon-button" aria-label="기록 모아보기 닫기" onClick={() => setAllRecordsOpen(false)}><X size={20} /></button></div></div>
+      {exportError && <p className="br-form-error" role="alert" style={{margin:"12px 24px"}}>{exportError}</p>}
       <div className="br-record-controls"><div className="br-record-switch"><button className={recordTab === "notes" ? "is-active" : ""} onClick={() => { setRecordTab("notes"); setMarkdownPreview(null); }}>부전지 <b>{combinedNotes.length}</b></button><button className={recordTab === "reviews" ? "is-active" : ""} onClick={() => setRecordTab("reviews")}>개인 검증 <b>{combinedReviews.length}</b></button></div><div className="br-md-actions"><button disabled={markdownBusy} onClick={() => void openNotesMarkdown(false)}><FileText size={13} />MD 보기</button><button disabled={markdownBusy} onClick={() => void openNotesMarkdown(true)}>{markdownBusy ? <LoaderCircle size={13} className="br-spin" /> : <ArrowDownToLine size={13} />}부전지 전체 MD</button></div><label className="br-record-search"><Search size={15} /><input aria-label="전체 기록 검색" placeholder="메모 또는 문항 검색" value={recordSearch} onChange={(event) => setRecordSearch(event.target.value)} /></label><label className="br-record-filter"><input type="checkbox" checked={unresolvedOnly} onChange={(event) => setUnresolvedOnly(event.target.checked)} />{recordTab === "notes" ? "미해결만" : "오류 있음만"}</label></div>
       <div className="br-records-content">{markdownPreview !== null && recordTab === "notes" ? <div className="br-markdown-view"><div><span>전체 부전지 · Markdown</span><button onClick={() => void openNotesMarkdown(false)} disabled={markdownBusy}><RotateCcw size={12} />새로고침</button><button onClick={() => setMarkdownPreview(null)}>카드로 보기</button></div><pre tabIndex={0} aria-label="전체 부전지 Markdown">{markdownPreview}</pre></div> : <><p className="br-record-result-count">{recordTab === "notes" ? filteredNotes.length : filteredReviews.length}개 표시</p>{recordTab === "notes" ? filteredNotes.length ? <div className="br-note-grid">{filteredNotes.map((note) => renderNote(note, true))}</div> : <div className="br-records-empty"><StickyNote size={32} strokeWidth={1} /><h3>{recordSearch || unresolvedOnly ? "조건에 맞는 메모가 없습니다." : "아직 남긴 메모가 없습니다."}</h3><p>문제를 읽다가 기억할 글에 부전지를 붙여 보세요.</p></div> : filteredReviews.length ? <div className="br-review-records">{filteredReviews.map((review) => <article key={keyFor(review.paperId, review.questionId, review.atomId)}><div>{review.localOnly ? <span className="br-status br-status-unreviewed">저장 전 초안 · {reviewNames[review.status]}</span> : <StatusBadge review={review} hash={paperCache.current.get(review.paperId)?.questions.find((q) => q.id === review.questionId)?.contentHash} />}<time>{dateLabel(review.updatedAt)}</time></div><button onClick={() => goToReview(review)}>{questionName(review)}<ArrowUpRight size={13} /></button>{review.atomId && reviewAtomStatement(review) && <blockquote className="br-review-atom-quote">{reviewAtomStatement(review)}</blockquote>}{review.detail && <p>{review.detail}</p>}</article>)}</div> : <div className="br-records-empty"><CheckCircle2 size={31} strokeWidth={1} /><h3>개인 검증 기록이 없습니다.</h3><p>각 문항 아래에서 검토 결과를 남길 수 있습니다.</p></div>}</>}</div>
       <footer>개인 검증 기록은 공식 정답 확정 여부와 별개입니다.{!initialUser && <a href={RECONNECT} target="_top">다시 연결하고 기록 저장하기<ArrowUpRight size={12} /></a>}</footer>

@@ -4,6 +4,7 @@ export const supabase=createClient('https://cefaekvclooytgjkcqum.supabase.co','s
   auth:{storageKey:'lawinus-bar-auth-v1',persistSession:true,autoRefreshToken:true,detectSessionInUrl:false},
 });
 const bucket='bar-review-materials';
+const catalogPath='/data/catalog-v006-06f627f2f8ce.json';
 const urls=new MaterialUrlCache(async key=>{
   const {data,error}=await supabase.storage.from(bucket).createSignedUrl(key,3600);
   if(error||!data)throw Error('자료에 접근할 수 없습니다. 연결 상태를 확인해 주세요.');
@@ -20,6 +21,7 @@ export async function hydrateMaterialLinks<T>(value:T):Promise<T>{
   return JSON.parse(output) as T;
 }
 export async function appFetch(url:string,init:RequestInit={}):Promise<Response>{
+  if(url==='/data/catalog.json')url=catalogPath;
   if(url.startsWith('/data/')||url.startsWith('/sources/'))return fetch(await privateUrl(url),init);
   if(!url.startsWith('/api/'))throw Error('Unexpected request');
   const method=init.method??'GET';

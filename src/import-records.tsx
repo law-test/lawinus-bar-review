@@ -38,6 +38,7 @@ export function ImportRecordsButton({ userId, onImported, serverNotes, serverRev
       try { value = JSON.parse((await file.text()).replace(/^\uFEFF/, "")); }
       catch { throw Error("JSON 파일을 읽을 수 없습니다. 원본 내보내기 파일을 선택해 주세요."); }
       const parsed = parseRecordExport(value);
+      const includesHistory = !!value && typeof value === "object" && "recordHistory" in value;
       const latest = getServerRecords ? await getServerRecords() : { notes: serverNotes, reviews: serverReviews };
       if (!latest) throw Error("저장된 기록을 다시 확인하지 못했습니다. 잠시 후 가져와 주세요.");
       if (generation.current !== attempt || activeUser.current !== originalUser) return;
@@ -48,7 +49,7 @@ export function ImportRecordsButton({ userId, onImported, serverNotes, serverRev
       catch { throw Error("브라우저에 초안을 보관할 공간이 없습니다. 기존 기록은 변경하지 않았습니다."); }
       onImported(result.drafts, result.summary);
       const counts = result.summary;
-      setMessage(`메모 ${counts.notesAdded}개와 검토 ${counts.reviewsAdded}개를 초안으로 가져왔습니다. 이미 있는 기록 ${counts.duplicatesSkipped}개는 유지했습니다.${counts.copiesPreserved ? ` 다른 내용의 메모 ${counts.copiesPreserved}개는 별도 초안으로 보관했습니다.` : ""}${counts.changedQuestions ? ` 본문이 바뀐 문항 ${counts.changedQuestions}개는 연결 내용을 확인해 주세요.` : ""} 각 초안을 확인한 뒤 저장해 주세요.`);
+      setMessage(`메모 ${counts.notesAdded}개와 검토 ${counts.reviewsAdded}개를 초안으로 가져왔습니다. 이미 있는 기록 ${counts.duplicatesSkipped}개는 유지했습니다.${counts.copiesPreserved ? ` 다른 내용의 메모 ${counts.copiesPreserved}개는 별도 초안으로 보관했습니다.` : ""}${counts.changedQuestions ? ` 본문이 바뀐 문항 ${counts.changedQuestions}개는 연결 내용을 확인해 주세요.` : ""} 각 초안을 확인한 뒤 저장해 주세요.${includesHistory ? " 변경 이력은 원본 JSON에 보존되며 서버 이력으로 가져오지는 않습니다." : ""}`);
     } catch (error) {
       if (generation.current !== attempt || activeUser.current !== originalUser) return;
       setFailed(true); setMessage(error instanceof Error ? error.message : "기록을 가져오지 못했습니다. 기존 기록은 유지됩니다.");

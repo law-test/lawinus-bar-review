@@ -28,7 +28,7 @@ export default function RecordHistory(){
     finally{if(run===generation.current)setBusy(false);}
   }
   return <><button className="br-button" type="button" onClick={()=>{setOpen(true);void load();}}>변경 이력</button>
-    <dialog ref={ref} className="br-records-dialog br-history-dialog" aria-labelledby="br-history-title" onCancel={()=>setOpen(false)} onClose={()=>setOpen(false)}>
+    <dialog ref={ref} className="br-records-dialog br-history-dialog" aria-labelledby="br-history-title" onCancel={event=>{event.stopPropagation();setOpen(false);}} onClose={event=>{event.stopPropagation();setOpen(false);}}>
       <div className="br-records-heading"><div><p className="br-eyebrow">MY RECORDS</p><h2 id="br-history-title">변경 이력</h2></div><button className="br-button" onClick={()=>setOpen(false)}>닫기</button></div>
       <div className="br-history-list" style={{padding:'24px',overflowY:'auto',maxHeight:'65vh'}}>
         {entries.map(row=>{const value=content(row);const date=row.createdAt??row.created_at??'';return <article key={row.id} className="br-note-card" style={{marginBottom:'16px'}}><div><strong>{row.kind==='note'?'부전지':'검증'} {labels[row.action]??row.action}</strong><time style={{float:'right'}} dateTime={date}>{date?new Date(date).toLocaleString('ko-KR'):''}</time></div>{value.question&&<p>{value.question}</p>}<p style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{value.body||'기록 내용 변경'}</p></article>;})}
