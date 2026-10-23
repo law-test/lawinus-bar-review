@@ -3,7 +3,10 @@ import { createRoot } from "react-dom/client";
 import type { User } from "@supabase/supabase-js";
 import { supabase, clearMaterialUrls, setMaterialUser } from "./backend";
 import ReviewWorkspace from "./review-workspace";
+import {RecordTransfer,takeRecordTransfer} from "./record-transfer";
 import "./login.css";
+
+const recordTransferToken=takeRecordTransfer();
 
 function sessionUserId(value: unknown): string | null {
   if (value === null) return null;
@@ -81,7 +84,7 @@ function App() {
     };
   }, [retry]);
 
-  if (user && reviewUser) return <ReviewWorkspace key={user.id} initialUser={reviewUser} />;
+  if (user && reviewUser) return <RecordTransfer token={recordTransferToken} userId={user.id}><ReviewWorkspace key={user.id} initialUser={reviewUser} /></RecordTransfer>;
   if (!ready) return <main className="auth-shell"><p role="status">검토실을 여는 중…</p></main>;
   return <main className="auth-shell"><section className="auth-card">
     <p className="auth-eyebrow">LAW IN US</p><h1>검토실을 열지 못했습니다.</h1>

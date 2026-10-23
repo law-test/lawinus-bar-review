@@ -16,6 +16,7 @@ import type {
 import "./review.css";
 import {appFetch as fetch, hydrateMaterialLinks} from "./backend";
 import { ImportRecordsButton } from "./import-records";
+import RecordHistory from "./record-history";
 import type { TargetRequest } from "./import-records-core";
 import { ReviewPaperCache } from "./paper-cache";
 
@@ -154,6 +155,13 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const [reviewErrors, setReviewErrors] = useState<Record<string, { message: string; current?: PersonalReview }>>({});
   const [selection, setSelection] = useState<SelectionAnchor | null>(null);
   const [allRecordsOpen, setAllRecordsOpen] = useState(false);
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("lawinus-bar-open-records") === "1") {
+        sessionStorage.removeItem("lawinus-bar-open-records"); setAllRecordsOpen(true);
+      }
+    } catch { /* The header button still opens the records. */ }
+  }, []);
   const [recordSearch, setRecordSearch] = useState("");
   const [recordTab, setRecordTab] = useState<"notes" | "reviews">("notes");
   const [markdownPreview, setMarkdownPreview] = useState<string | null>(null);
@@ -250,7 +258,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
     if (!layoutRef.current || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(([entry]) => {
       const available = entry.contentRect.width;
-      if (available <= 900) return;
+      if (window.innerWidth <= 900) return;
       setWidths((previous) => {
         const maximum = available - 390;
         if (previous.left + previous.right <= maximum) return previous;
@@ -761,8 +769,8 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
 
   return <div className="br-workspace" style={layoutStyle}>
     <a className="br-skip-link" href="#br-reading">문제 본문으로 이동</a>
-    <header className="br-header"><a className="br-brand" href="/" aria-label="민법위키 처음으로"><span className="br-brand-symbol"><Scale size={21} strokeWidth={1.5} /></span><span><b>민법위키</b><small>변호사시험 검토실</small></span></a>
-      <div className="br-header-center"><span className="br-header-rule" />읽고, 살피고, 기록하다<span className="br-header-rule" /></div>
+    <header className="br-header"><a className="br-brand" href="/" aria-label="변호사시험 검토실 처음으로"><span className="br-brand-symbol" aria-hidden="true">§</span><span><b>민법위키 하랑재</b><small>변호사시험 검토실</small></span></a>
+      <div className="br-header-center"><span className="br-header-rule" />문제 · 해설 · 근거를 한눈에<span className="br-header-rule" /></div>
       <div className="br-header-actions"><button className="br-my-records" onClick={(event) => { lastRecordTrigger.current = event.currentTarget; setAllRecordsOpen(true); }}><Library size={16} /><span>내 기록</span>{combinedNotes.length > 0 && <b>{combinedNotes.length}</b>}</button>
         {initialUser ? <span className="br-user" title={initialUser.email}><span>{(initialUser.name || "나").slice(0, 1)}</span><b>{initialUser.name || "내 계정"}</b></span> : <a className="br-login" href={RECONNECT} target="_top">다시 연결<ArrowUpRight size={13} /></a>}</div></header>
     <nav className="br-mobile-tabs" aria-label="학습 화면"><button className={mobileTab === "contents" ? "is-active" : ""} onClick={() => setMobileTab("contents")}><BookOpen size={15} />목차</button><button className={mobileTab === "reading" ? "is-active" : ""} onClick={() => setMobileTab("reading")}><FileText size={15} />문제</button><button className={mobileTab === "reference" ? "is-active" : ""} onClick={() => setMobileTab("reference")}><StickyNote size={15} />근거 · 부전지</button></nav>
@@ -817,7 +825,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
         serverNotes={recordsReady && !recordsError ? notes : undefined} serverReviews={recordsReady && !recordsError ? reviews : undefined}
         getServerRecords={loadRecords} resolveTarget={catalog ? resolveImportedTarget : undefined} onImported={(drafts) => {
           setNoteDrafts(drafts.notes); setReviewDrafts(drafts.reviews); setStorageError(false); setMarkdownPreview(null); refreshRecordMetadata(value => value + 1);
-        }} />}<button className="br-button" onClick={exportRecords}><ArrowDownToLine size={14} />전체 기록 내보내기</button><button className="br-icon-button" aria-label="기록 모아보기 닫기" onClick={() => setAllRecordsOpen(false)}><X size={20} /></button></div></div>
+        }} />}<RecordHistory /><button className="br-button" onClick={exportRecords}><ArrowDownToLine size={14} />전체 기록 내보내기</button><button className="br-icon-button" aria-label="기록 모아보기 닫기" onClick={() => setAllRecordsOpen(false)}><X size={20} /></button></div></div>
       <div className="br-record-controls"><div className="br-record-switch"><button className={recordTab === "notes" ? "is-active" : ""} onClick={() => { setRecordTab("notes"); setMarkdownPreview(null); }}>부전지 <b>{combinedNotes.length}</b></button><button className={recordTab === "reviews" ? "is-active" : ""} onClick={() => setRecordTab("reviews")}>개인 검증 <b>{combinedReviews.length}</b></button></div><div className="br-md-actions"><button disabled={markdownBusy} onClick={() => void openNotesMarkdown(false)}><FileText size={13} />MD 보기</button><button disabled={markdownBusy} onClick={() => void openNotesMarkdown(true)}>{markdownBusy ? <LoaderCircle size={13} className="br-spin" /> : <ArrowDownToLine size={13} />}부전지 전체 MD</button></div><label className="br-record-search"><Search size={15} /><input aria-label="전체 기록 검색" placeholder="메모 또는 문항 검색" value={recordSearch} onChange={(event) => setRecordSearch(event.target.value)} /></label><label className="br-record-filter"><input type="checkbox" checked={unresolvedOnly} onChange={(event) => setUnresolvedOnly(event.target.checked)} />{recordTab === "notes" ? "미해결만" : "오류 있음만"}</label></div>
       <div className="br-records-content">{markdownPreview !== null && recordTab === "notes" ? <div className="br-markdown-view"><div><span>전체 부전지 · Markdown</span><button onClick={() => void openNotesMarkdown(false)} disabled={markdownBusy}><RotateCcw size={12} />새로고침</button><button onClick={() => setMarkdownPreview(null)}>카드로 보기</button></div><pre tabIndex={0} aria-label="전체 부전지 Markdown">{markdownPreview}</pre></div> : <><p className="br-record-result-count">{recordTab === "notes" ? filteredNotes.length : filteredReviews.length}개 표시</p>{recordTab === "notes" ? filteredNotes.length ? <div className="br-note-grid">{filteredNotes.map((note) => renderNote(note, true))}</div> : <div className="br-records-empty"><StickyNote size={32} strokeWidth={1} /><h3>{recordSearch || unresolvedOnly ? "조건에 맞는 메모가 없습니다." : "아직 남긴 메모가 없습니다."}</h3><p>문제를 읽다가 기억할 글에 부전지를 붙여 보세요.</p></div> : filteredReviews.length ? <div className="br-review-records">{filteredReviews.map((review) => <article key={keyFor(review.paperId, review.questionId, review.atomId)}><div>{review.localOnly ? <span className="br-status br-status-unreviewed">저장 전 초안 · {reviewNames[review.status]}</span> : <StatusBadge review={review} hash={paperCache.current.get(review.paperId)?.questions.find((q) => q.id === review.questionId)?.contentHash} />}<time>{dateLabel(review.updatedAt)}</time></div><button onClick={() => goToReview(review)}>{questionName(review)}<ArrowUpRight size={13} /></button>{review.atomId && reviewAtomStatement(review) && <blockquote className="br-review-atom-quote">{reviewAtomStatement(review)}</blockquote>}{review.detail && <p>{review.detail}</p>}</article>)}</div> : <div className="br-records-empty"><CheckCircle2 size={31} strokeWidth={1} /><h3>개인 검증 기록이 없습니다.</h3><p>각 문항 아래에서 검토 결과를 남길 수 있습니다.</p></div>}</>}</div>
       <footer>개인 검증 기록은 공식 정답 확정 여부와 별개입니다.{!initialUser && <a href={RECONNECT} target="_top">다시 연결하고 기록 저장하기<ArrowUpRight size={12} /></a>}</footer>
