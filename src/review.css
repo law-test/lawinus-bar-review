@@ -354,3 +354,5 @@
 .br-source-dialog .br-reference-prose { font-size:16px; line-height:1.95; }
 @media(max-width:600px) { .br-source-dialog { width:calc(100vw - 16px); max-height:calc(100dvh - 24px); } .br-source-dialog-heading { padding:13px 16px; } .br-source-dialog-body { padding:20px 18px 28px; } .br-source-dialog .br-reference-prose { font-size:15px; } }
 @media print { .br-workspace .br-citation-link { color:inherit; text-decoration:none; } .br-source-dialog,.br-reference-expand { display:none!important; } }
+
+.br-reference-prose p { white-space:pre-line; }
