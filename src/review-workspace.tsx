@@ -14,6 +14,9 @@ import type {
   ReviewUser, SelectionAnchor,
 } from "./review-types";
 import "./review.css";
+import { decorateReferenceNodes, referenceIdsForUrl } from "./reference-links";
+import type { CitationRequest } from "./reference-links";
+import { ReferenceViewer } from "./reference-viewer";
 import {appFetch as fetch, hydrateMaterialLinks, supabase} from "./backend";
 import {collectRecordBackup, reconnectNote} from "./record-backup";
 import type {SavedRecords, HistoryPage} from "./record-backup";
@@ -157,6 +160,8 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const [mobileTab, setMobileTab] = useState<"contents" | "reading" | "reference">("reading");
   const [rightTab, setRightTab] = useState<"reference" | "notes">("reference");
   const [activeReferenceId, setActiveReferenceId] = useState("");
+  const [referenceRequest, setReferenceRequest] = useState<CitationRequest | null>(null);
+  const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
   const [widths, setWidths] = useState({ left: 240, right: 340 });
   const [notes, setNotes] = useState<PersonalNote[]>([]);
   const [reviews, setReviews] = useState<PersonalReview[]>([]);
@@ -198,6 +203,8 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   const layoutRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const referenceDialogRef = useRef<HTMLDialogElement>(null);
+  const lastReferenceTrigger = useRef<HTMLElement | null>(null);
   const lastRecordTrigger = useRef<HTMLElement | null>(null);
   const scrollLock = useRef(0);
   const workspaceAlive = useRef(true);
@@ -237,7 +244,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
     return [...new Set([...(currentQuestion.referenceIds ?? []), ...currentQuestion.atoms.flatMap((item) => item.referenceIds ?? [])])]
       .map((id) => refMap.get(id)).filter((item): item is ReviewReference => !!item);
   }, [currentQuestion, refMap]);
-  const activeReference = refMap.get(activeReferenceId) ?? relevantReferences[0];
+  const activeReference = referenceRequest ? undefined : refMap.get(activeReferenceId) ?? relevantReferences[0];
 
   const loadRecords = useCallback(async () => {
     if (!initialUser || recordWrites.current > 0 || !workspaceAlive.current) return;
@@ -338,7 +345,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
     if (!catalog || !paperId) return;
     const index = catalog.exams.flatMap((item) => item.papers).find((item) => item.id === paperId);
     if (!index) { setPaperError("이 문서를 찾을 수 없습니다."); return; }
-    const controller = new AbortController(); setPaperLoading(true); setPaperError(""); setPaper(null); setSelection(null); setActiveReferenceId("");
+    const controller = new AbortController(); setPaperLoading(true); setPaperError(""); setPaper(null); setSelection(null); setActiveReferenceId(""); setReferenceRequest(null);
     const fetchPaper = loadDisplayPaper(index, controller.signal);
     fetchPaper.then((data) => {
       if (controller.signal.aborted) return;
@@ -408,7 +415,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
   }, []);
 
   const jumpQuestion = useCallback((id: string, changeAddress = true) => {
-    setActiveQuestionId(id); setActiveOutlineId(""); setSelection(null); setActiveReferenceId(""); setMobileTab("reading");
+    setActiveQuestionId(id); setActiveOutlineId(""); setSelection(null); setActiveReferenceId(""); setReferenceRequest(null); setMobileTab("reading");
     if (changeAddress) updateAddress(examId, paperId, id);
     scrollLock.current = Date.now() + 800;
     window.requestAnimationFrame(() => document.getElementById(qElementId(id))?.scrollIntoView({ behavior: "auto", block: "start" }));
@@ -434,7 +441,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
       const params = new URLSearchParams(window.location.search); const id = params.get("paper");
       const nextExam = catalog?.exams.find((e) => e.papers.some((p) => p.id === id));
       if (!nextExam || !id) return;
-      setFamily(nextExam.family); setExamId(nextExam.id); setMobileTab("reading"); setActiveReferenceId("");
+      setFamily(nextExam.family); setExamId(nextExam.id); setMobileTab("reading"); setActiveReferenceId(""); setReferenceRequest(null);
       const q = params.get("q") ?? "";
       if (id === paperId) { if (q) jumpQuestion(q, false); }
       else { setRequestedQuestion(q); setPaperId(id); }
@@ -492,17 +499,76 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
       persistLocal(WIDTH_KEY, { ...next, containerWidth: available }); return next;
     });
   };
-  const selectReference = (id: string, questionId?: string) => {
+  // Decoration changes only DOM structure; saved text, offsets and source data stay intact.
+  useEffect(() => {
+    if (!paper || paperLoading || !readingRef.current) return;
+    for (const region of readingRef.current.querySelectorAll<HTMLElement>("[data-anchor-region]")) {
+      const qid = region.closest<HTMLElement>("[data-question-id]")?.dataset.questionId;
+      const question = paper.questions.find(item => item.id === qid);
+      const atomId = region.closest<HTMLElement>("[data-atom-id]")?.dataset.atomId;
+      const atom = question?.atoms.find(item => item.id === atomId);
+      const preferred = atom?.referenceIds?.length ? atom.referenceIds : question?.referenceIds ?? [];
+      decorateReferenceNodes(region, paper.references, preferred);
+    }
+  }, [paper, paperLoading]);
+  useEffect(() => {
+    const dialog = referenceDialogRef.current;
+    if (!dialog) return;
+    if (!referenceDialogOpen) { if (dialog.open) dialog.close(); return; }
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    if (!dialog.open) dialog.showModal();
+    return () => { document.body.style.overflow = overflow; };
+  }, [referenceDialogOpen]);
+  useEffect(() => {
+    if (referenceDialogOpen) {
+      const body = referenceDialogRef.current?.querySelector<HTMLElement>(".br-source-dialog-body");
+      if (body) body.scrollTop = 0;
+    }
+  }, [referenceDialogOpen, activeReference?.id, referenceRequest]);
+  const openReferenceView = (questionId?: string) => {
     scrollLock.current = Date.now() + 900;
     if (questionId) setActiveQuestionId(questionId);
+    setRightTab("reference"); setSelection(null);
+    if (window.matchMedia("(max-width: 900px)").matches) setReferenceDialogOpen(true);
+    else window.requestAnimationFrame(() => {
+      const container = document.querySelector<HTMLElement>("#br-reference-panel .br-right-scroll");
+      const detail = container?.querySelector<HTMLElement>(".br-reference-detail");
+      if (container && detail) container.scrollTop += detail.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    });
+  };
+  const selectReference = (id: string, questionId?: string) => {
     if (!refMap.has(id)) { setNotice("이 근거의 본문을 찾을 수 없습니다."); return; }
-    setActiveReferenceId(id); setRightTab("reference"); setMobileTab("reference"); setSelection(null);
-    window.requestAnimationFrame(() => document.querySelector('.br-reference-detail')?.scrollIntoView({ block: 'start' }));
+    if (!referenceDialogOpen && document.activeElement instanceof HTMLElement && document.activeElement !== document.body) lastReferenceTrigger.current = document.activeElement;
+    setReferenceRequest(null); setActiveReferenceId(id); openReferenceView(questionId);
   };
   const handleReferenceClick = (event: MouseEvent<HTMLElement>) => {
-    const target = (event.target as HTMLElement).closest<HTMLElement>("[data-reference-id]");
-    if (!target) return;
-    event.preventDefault(); selectReference(target.dataset.referenceId!, target.closest<HTMLElement>("[data-question-id]")?.dataset.questionId);
+    const target = (event.target as HTMLElement).closest<HTMLElement>("[data-reference-id],[data-citation-query],a[href]");
+    if (!target || !event.currentTarget.contains(target) || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    // A drag ending on a citation is a text selection, not a reference click.
+    const native = window.getSelection();
+    if (event.detail > 0 && native && !native.isCollapsed && native.rangeCount && readingRef.current?.contains(native.anchorNode)) {
+      event.preventDefault(); return;
+    }
+    const questionId = target.closest<HTMLElement>("[data-question-id]")?.dataset.questionId;
+    if (target.dataset.referenceId) {
+      event.preventDefault(); if (!referenceDialogOpen) lastReferenceTrigger.current = target; selectReference(target.dataset.referenceId, questionId); return;
+    }
+    let candidateIds: string[] = [];
+    if (target.dataset.citationQuery) {
+      try { candidateIds = JSON.parse(target.dataset.referenceCandidates ?? "[]").filter((id: unknown) => typeof id === "string" && refMap.has(id)); } catch { /* Show the unmatched citation. */ }
+    } else {
+      candidateIds = referenceIdsForUrl((target as HTMLAnchorElement).href, references);
+      if (!candidateIds.length) return;
+    }
+    event.preventDefault(); if (!referenceDialogOpen) lastReferenceTrigger.current = target;
+    if (candidateIds.length === 1) { selectReference(candidateIds[0], questionId); return; }
+    setReferenceRequest({ query: target.dataset.citationQuery ?? target.textContent ?? "참조 근거", kind: target.dataset.citationKind === "case" ? "case" : "law", candidateIds });
+    setActiveReferenceId(""); openReferenceView(questionId);
+  };
+  const expandReference = () => {
+    lastReferenceTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setReferenceDialogOpen(true);
   };
 
   const captureSelection = () => {
@@ -910,8 +976,7 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
           {rightTab === "reference" ? <div role="tabpanel" id="br-reference-content" aria-labelledby="br-reference-tab">
             <div className="br-right-context"><span>{currentQuestion?.label ?? "참조 자료"}</span><small>{relevantReferences.length}개의 연결 근거</small></div>
             {relevantReferences.length > 0 && <div className="br-reference-list">{relevantReferences.map((ref) => <button key={ref.id} aria-pressed={activeReference?.id === ref.id} className={activeReference?.id === ref.id ? "is-active" : ""} onClick={() => selectReference(ref.id)}><span className={`br-reference-kind br-reference-kind-${ref.kind}`}>{referenceNames[ref.kind]}</span><span>{ref.title}</span><ChevronRight size={12} /></button>)}</div>}
-            {activeReference ? <section className="br-reference-detail" key={activeReference.id}><div className="br-reference-detail-kicker"><span className={`br-reference-kind br-reference-kind-${activeReference.kind}`}>{referenceNames[activeReference.kind]}</span>{activeReference.status && <span>{activeReference.status}</span>}</div><h2>{activeReference.title}</h2><div className="br-prose br-reference-prose" onClick={handleReferenceClick} dangerouslySetInnerHTML={{ __html: referenceDisplayHtml(activeReference.html || "<p>본문을 확인할 자료가 없습니다.</p>") }} />{activeReference.url && <a className="br-official-link" href={activeReference.url} target="_blank" rel="noreferrer">공식 원문 보기<ArrowUpRight size={14} /></a>}</section>
-              : <div className="br-reference-empty"><Scale size={32} strokeWidth={1} /><h2>판단의 근거를 곁에.</h2><p>본문의 조문이나 판례를 누르면<br />이곳에서 이어 읽을 수 있습니다.</p><span>조문 · 판례 · 공식 원문</span></div>}
+            <ReferenceViewer reference={activeReference} request={referenceRequest} references={references} onSelect={selectReference} onExpand={expandReference} onReferenceClick={handleReferenceClick} displayHtml={referenceDisplayHtml} />
           </div> : <div role="tabpanel" id="br-notes-content" aria-labelledby="br-notes-tab"><div className="br-right-context"><span>{editor ? "메모 작성" : currentQuestion?.label ?? "나의 메모"}</span><button className="br-text-button" disabled={!currentQuestion} onClick={() => currentQuestion && startNote(currentQuestion)}><Plus size={13} />새 메모</button></div>
             {editor && <section className={`br-note-editor br-note-${editor.color ?? "yellow"}`}><div className="br-editor-heading"><span>{editor.anchorText ? "선택한 글에 부전지" : editor.atomId ? "atom 메모" : "문항 메모"}</span><button className="br-icon-button" aria-label="메모 작성 닫기. 초안은 보존됩니다." onClick={() => setEditor(null)}><X size={15} /></button></div><p className="br-editor-context">{questionName(editor)}</p>{editor.anchorText && <blockquote>{editor.anchorText}</blockquote>}{editor.paperId === paperId && paper?.questions.find((q) => q.id === editor.questionId)?.contentHash !== editor.contentHash && <div className="br-form-error"><p>이 메모를 작성한 뒤 본문이 변경되었습니다. 인용 위치와 내용을 다시 확인해 주세요.</p><button className="br-text-button" disabled={noteSourceChecking || noteSaving} onClick={() => void prepareNoteReconnect()}>{noteSourceChecking ? "최신 본문 확인 중…" : "최신 본문 확인"}</button></div>}<label className="br-sr-only" htmlFor="br-note-body">메모 내용</label><textarea ref={editorRef} disabled={noteSaving} id="br-note-body" placeholder="떠오른 생각, 더 확인할 것을 적어 보세요." value={editor.body} rows={7} onChange={(event) => updateEditor({ body: event.target.value })} />
               <div className="br-editor-color-row"><div aria-label="부전지 색상" className="br-note-colors">{NOTE_COLORS.map((color, index) => <button disabled={noteSaving} aria-label={`${["노랑", "민트", "분홍", "파랑"][index]} 부전지`} aria-pressed={editor.color === color} className={`br-color-${color}`} key={color} onClick={() => updateEditor({ color })}>{editor.color === color && <Check size={12} />}</button>)}</div><span>초안 보관</span></div>
@@ -927,6 +992,16 @@ export default function ReviewWorkspace({ initialUser }: { initialUser: ReviewUs
     </div>
     {selection && <div className="br-selection-action" style={{ top: selection.top, left: selection.left }}><button aria-keyshortcuts="Alt+N" title="선택한 글에 부전지 · Alt+N" onMouseDown={(event) => event.preventDefault()} onClick={() => { const question = paper?.questions.find((q) => q.id === selection.questionId); if (question) startNote(question, selection.atomId, selection); }}><StickyNote size={15} />선택한 글에 부전지</button><button aria-label="텍스트 선택 메뉴 닫기" onClick={() => setSelection(null)}><X size={13} /></button></div>}
     <div className="br-toast" role="status" aria-live="polite">{notice && <><CheckCircle2 size={15} /><span>{notice}</span><button aria-label="안내 닫기" onClick={() => setNotice("")}><X size={13} /></button></>}</div>
+    <dialog className="br-source-dialog" ref={referenceDialogRef} aria-labelledby="br-source-title" onCancel={() => setReferenceDialogOpen(false)} onClose={() => {
+      setReferenceDialogOpen(false);
+      window.requestAnimationFrame(() => {
+        const trigger = lastReferenceTrigger.current;
+        (trigger?.isConnected ? trigger : readingRef.current)?.focus({ preventScroll: true });
+      });
+    }}>
+      <header className="br-source-dialog-heading"><h2 id="br-source-title">참조 근거</h2><button className="br-icon-button" aria-label="참조 근거 닫기" onClick={() => setReferenceDialogOpen(false)}><X size={20} /></button></header>
+      <div className="br-source-dialog-body"><ReferenceViewer reference={activeReference} request={referenceRequest} references={references} onSelect={selectReference} onReferenceClick={handleReferenceClick} displayHtml={referenceDisplayHtml} /></div>
+    </dialog>
     <dialog className="br-records-dialog" ref={dialogRef} aria-labelledby="br-records-title" onCancel={() => setAllRecordsOpen(false)} onClose={() => { setAllRecordsOpen(false); if (editor) window.requestAnimationFrame(() => editorRef.current?.focus()); else lastRecordTrigger.current?.focus(); }}>
       <div className="br-records-heading"><div><p className="br-eyebrow">MY READING NOTES</p><h2 id="br-records-title">나의 기록</h2></div><div>{initialUser && <ImportRecordsButton userId={initialUser.id}
         serverNotes={recordsReady && !recordsError ? notes : undefined} serverReviews={recordsReady && !recordsError ? reviews : undefined}
