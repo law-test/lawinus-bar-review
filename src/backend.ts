@@ -4,7 +4,7 @@ export const supabase=createClient('https://cefaekvclooytgjkcqum.supabase.co','s
   auth:{storageKey:'lawinus-bar-auth-v1',persistSession:true,autoRefreshToken:true,detectSessionInUrl:false},
 });
 const bucket='bar-review-materials';
-const catalogPath='/data/catalog-v022-cae96124518f.json';
+const catalogPath='/data/catalog-v023-c50785495138.json';
 const urls=new MaterialUrlCache(async key=>{
   const {data,error}=await supabase.storage.from(bucket).createSignedUrl(key,3600);
   if(error||!data)throw Error('자료에 접근할 수 없습니다. 연결 상태를 확인해 주세요.');
